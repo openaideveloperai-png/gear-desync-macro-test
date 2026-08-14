@@ -56,7 +56,7 @@ local cancelAfter = math.huge
 function isCancelled() return T/1000 > cancelAfter end
 function sleepUntilCancelled(ms) sleep(ms) return isCancelled() end
 function throwIfCancelled() if isCancelled() then error("cancelled") end end
-function checkpoint() end
+function checkpoint() T = T + 10 end   -- loop overhead
 function shouldYield() return false end
 
 -- ---- ui ----
@@ -72,12 +72,19 @@ function ui.sliderInt(id,l,d,mn,mx,w)
     if settings[id]==nil then settings[id]=d end
 end
 function ui.sliderFloat(id,l,d,mn,mx,w) ui.sliderInt(id,l,d,mn,mx,w) end
-function ui.dropdown(id,l,o,d,w) if settings[id]==nil then settings[id]=d end end
+function ui.dropdown(id,l,o,d,w)
+    assert(type(o)=="table" and #o>0, "dropdown "..id.." needs an options array")
+    local hit=false
+    for _,v in ipairs(o) do if v==d then hit=true end end
+    assert(hit or type(d)=="number", "dropdown "..id.." default '"..tostring(d).."' not in options")
+    uiDefs[#uiDefs+1]={k="dropdown",id=id,d=d,opts=o}
+    if settings[id]==nil then settings[id]=d end
+end
 function ui.textbox(id,l,d,w,h) if settings[id]==nil then settings[id]=d end end
 function ui.dynamicTextbox(id,l,d,w,h) dynamic[id]=d; uiDefs[#uiDefs+1]={k="dyn",id=id} end
 function ui.setDynamicText(id,t)
     assert(dynamic[id]~=nil, "setDynamicText on undeclared id '"..tostring(id).."'")
-    dynamic[id]=t
+    rec("ui"); dynamic[id]=t
 end
 function ui.keybind(id,l,d,w) if settings[id]==nil then settings[id]=d end end
 function ui.hotkey(id,l,d,w) uiDefs[#uiDefs+1]={k="hotkey",id=id,d=d}; if settings[id]==nil then settings[id]=d end end
@@ -95,11 +102,11 @@ local down = {}
 function holdKey(k)
     assert(VALID_KEYS[k], "holdKey: invalid key name '"..tostring(k).."'")
     assert(not down[k], "holdKey: '"..k.."' already held (double-hold leak)")
-    down[k]=true; rec("down",k)
+    down[k]=true; rec("down",k); T = T + 20   -- SendInput cost
 end
 function releaseKey(k)
     assert(VALID_KEYS[k], "releaseKey: invalid key name '"..tostring(k).."'")
-    down[k]=nil; rec("up",k)
+    down[k]=nil; rec("up",k); T = T + 20
 end
 function pressKey(k,d) holdKey(k); sleep(d or 10); releaseKey(k) end
 function isKeyPressed(k) return down[k]==true end

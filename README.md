@@ -1,171 +1,175 @@
-# Gear Desync v3 — SMU Lua macro
+# Gear Desync v4 — SMU Lua macro
 
-Item/gear desync for Roblox, written for [Spencer Macro Utilities](https://github.com/Spencer0187/Spencer-Macro-Utilities)
-(`docs/lua_macro_scripting.md`).
+Item/gear desync for Roblox, built on **SMU's own shipped implementation** and
+extended to desync several hotbar slots at once.
 
 Drop `gear_desync.lua` into your SMU scripts folder, open its settings, tick
 **Self-test only**, and fire it once before anything else.
 
 ---
 
-## Why v1 and v2 did nothing
+## What the shipped macro actually does
 
-**v1** spammed the slot key. That does nothing on its own — correctly identified
-in the v2 header.
+SMU has a built-in **Item Desync** macro. Its entire body, from
+[`app/macro_runtime.cpp`](https://github.com/Spencer0187/Spencer-Macro-Utilities/blob/main/app/macro_runtime.cpp):
 
-**v2** added the freeze and assumed that was the missing half. It wasn't. Running
-both through a mock of the SMU API, here is what each actually emits on a trigger
-press:
-
-```
-v2:  1  [FREEZE]  1  1  [UNFREEZE]
-v3:     [FREEZE]  1  1  [UNFREEZE]  1  Backspace
+```cpp
+const unsigned int slotKey = InventorySlotKey(desync_slot);
+HoldKey(slotKey);  ReleaseKey(slotKey);
+HoldKey(slotKey);  ReleaseKey(slotKey);
 ```
 
-v2 never presses the drop key, never touches a second inventory slot, and never
-does the final equip+drop. The documented glitch desyncs an **equipped handle
-against an item lying on the ground** — with nothing on the ground there is
-nothing to desync against, so v2 could not work regardless of how well its
-freeze landed.
+…run every runtime tick for as long as the trigger is held. That is the whole
+thing. Note what is **not** in it:
 
-### The procedure it was missing
+- no `freeze()`
+- no drop key / Backspace
+- no second inventory slot, no item on the ground
+- no delay of any kind between the presses
 
-From the [Roblox Glitches Wiki — Item Desync](https://roblox-glitches.fandom.com/wiki/Item_Desync)
-(discovered 2023 by Superglitch11):
+The zero delay is deliberate. The sibling **Item Clip** macro is the same shape
+but sleeps `clip_delay/2` between press and release; Item Desync is the flat-out
+variant. You equip and unequip faster than the server can replicate the Handle
+weld, so the server's copy lags behind the client's.
 
-1. Put items in the first 10 hotbar slots. Two are used — call them A and B.
-2. Press **B**, then **Backspace** → the slot-B item lands on the ground.
-3. Press **A** → equip the slot-A item.
-4. Walk toward the dropped item; **freeze just before you reach it**.
-5. Press **A** twice.
-6. Unfreeze, equip slot A, drop it.
+Freeze is a **separate macro** in SMU with its own hotkey (`vk_mbutton`). People
+combine the two by hand. That is where the freeze step in the
+[2023 wiki writeup](https://roblox-glitches.fandom.com/wiki/Item_Desync) comes
+from — it is not part of item desync itself.
 
-Steps 2–3 are the **SETUP** hotkey (default `F6`). Steps 4–6 are the **TRIGGER**
-hotkey (default `F5`). The walking in step 4 is yours — the macro can't know when
-you're "just before" the item, which is why the freeze fires on a hotkey you press
-at that moment instead of on a timer.
+### Correction to v3
 
-### v2's self-test could not fail
-
-```lua
-t0 = nowMicros(); freeze(true); sleep(400); freeze(false)
-if (nowMicros() - t0) < 350 then  -- "freeze is probably not applying"
-```
-
-`sleep()` runs on the macro thread, not on the suspended target, so that elapsed
-time is ~400 ms whether or not the freeze did anything at all. It measured its own
-`sleep`. The v3 self-test drains the Roblox log, suspends, and re-reads: a live
-client writes log lines continuously, a suspended one writes none. That check can
-actually fail.
+v3 of this script was built on that wiki procedure (drop an item, walk to it,
+freeze, tap twice, unfreeze, equip+drop) on the assumption that the freeze was
+the essential step. The author's own source says otherwise. **The v1 approach —
+spam the slot key — was closest to correct all along**; it was just single-slot,
+not tight enough, and had no diagnostics. The wiki procedure is kept here as
+method 3 because it is a genuinely different *positional* desync, but it is the
+least likely of the three to still work.
 
 ---
 
-## The mechanism
+## Methods
 
-Slot A is already equipped when you trigger. `freeze()` suspends the Roblox
-process, so Roblox stops pumping its window message queue while Windows keeps
-posting to it — synthetic keypresses stack up unconsumed. Meanwhile the server
-keeps simulating your character with no client updates arriving.
+| # | Method | Shape | Notes |
+| --- | --- | --- | --- |
+| 1 | **Loop (shipped)** | Hold-to-run | The shipped implementation, generalised to N slots. **Start here.** |
+| 2 | **Freeze burst** | One-shot per press | The same churn, queued into a suspended client so the whole burst flushes in one or two frames. |
+| 3 | **Ground item (2023 wiki)** | Setup key + trigger | The old procedure. Needs a droppable item and correct positioning. |
 
-On unfreeze the queue drains in one or two frames: the two slot-A taps become
-unequip-then-equip **inside a single frame**, so the Handle weld is destroyed and
-recreated before any position update replicates. The collider is left at a stale
-CFrame while the rendered handle follows you.
+The lag switch can be layered on top of any of them.
+
+## Desyncing multiple items
+
+Put every slot in the **Slots** box: `1,2,3`. Commas, spaces and semicolons all
+work; `10` and `0` both mean the 0 key; duplicates are dropped.
+
+| Order | Behaviour | Use when |
+| --- | --- | --- |
+| **Interleave** (default) | `1 1 2 2 3 3` every pass — all slots churn continuously | The direct generalisation of the shipped macro. Try first. |
+| **Burst per slot** | Finishes `burst_len` cycles on one slot before moving on | Slots seem to fight each other and none desyncs properly. |
+| **Round robin** | One slot per pass, rotating | Lowest per-slot rate; a middle ground. |
+
+With one slot configured, all three modes are identical to the shipped macro.
 
 ---
 
 ## Tuning
 
-Run the self-test first. If the freeze isn't landing, **no slider here helps** —
-the fix is the Roblox process name in SMU's main settings.
+Defaults match the shipped macro exactly: **2 cycles per pass, 0 ms hold, 0 ms
+delay.**
 
 | Setting | Default | Notes |
 | --- | --- | --- |
-| Drift | 250 ms | The main dial. Start here and walk it up. Too short → no offset builds. Too long → the server rubber-bands you back and eats the desync. |
-| Frozen taps | 2 | The method uses 2. Slot A is already equipped, so these are unequip → equip. |
-| Tail | 130 ms | Lets the queued input settle before the client resumes. |
-| Pre-taps | 0 | Slot A is already equipped after SETUP. Only raise this if you trigger without running SETUP. |
-| Sustain | 0 (off) | The v1 behaviour. Can't create a desync, can widen one the freeze already made. |
+| Cycles per pass | 2 | What the shipped code does per tick. |
+| Key hold | 0 ms | `HoldKey` immediately followed by `ReleaseKey`. Raise only if the game drops zero-length presses. |
+| Delay between passes | 0 ms | Flat out. The script still calls `checkpoint()` so the watchdog doesn't kill it. |
+| Stop after | 30 s | Safety limit on a held trigger. 0 disables. |
 
-**Keep the whole frozen window under SMU's `maxfreezetime`.** SMU auto-unfreezes at
-that cap; if your window is longer it will unfreeze underneath you mid-sequence and
-the run silently does nothing. The self-test prints your planned window next to the
-cap and flags the conflict, and `onExecute` warns at arm time. There's also a hard
-4000 ms refusal.
+The self-test reports your **achievable churn rate** in cycles/sec. The shipped
+macro relies on going flat out — if your input backend is slow, the desync may
+never build, and that number tells you so.
 
 ---
 
 ## What the self-test checks
 
-- Target process name (`settingsBuffer`) — **the most common reason freeze silently does nothing**
-- `maxfreezetime` / `maxfreezeoverride` auto-unfreeze cap vs. this config's planned window
-- `freezeoutsideroblox`, `takeallprocessids`
-- Platform (`freeze` uses stop/continue signals on macOS; the lag-switch backend doesn't exist there)
-- Whether `freeze(true)` raises, and how long each call takes
-- Whether the client kept writing log lines while suspended
+- **Your built-in Item Desync macro's own settings** (`desync_slot`,
+  `ItemDesyncSlot`, `vk_f5`) and Item Clip's (`clip_slot`, `clip_delay`,
+  `isitemclipswitch`). If the built-in works for you and this script doesn't,
+  the difference is visible right here.
+- Achievable equip/unequip cycles per second
+- Slot parsing — what it understood, what it ignored
+- Target process name (`settingsBuffer`) — only matters for methods 2 and 3
+- `maxfreezetime` auto-unfreeze cap vs. the planned freeze window
+- Whether `freeze(true)` raises, and whether the client kept writing log lines
+  while suspended (a live client logs continuously; a suspended one doesn't)
 - Lag-switch `available` / `active` / `targetMode` / `unsupportedReason`
-
----
-
-## API bugs fixed
-
-Verified against `docs/lua_macro_scripting.md`:
-
-- **`onCleanup` was not fault-tolerant.** A raising `releaseKey` would skip the
-  unfreeze and leave the client suspended. Each teardown step is now `pcall`'d
-  independently. (`freeze(true)` is forbidden in cleanup; `freeze(false)` is allowed —
-  v3 only ever calls the latter.)
-- **Only one held key was tracked** (`heldKey`), so a mid-sequence abort could leak
-  a key. Now a `heldKeys` set, released in full.
-- **UI writes inside the frozen window.** `step()` called `ui.setDynamicText` +
-  `table.concat` on every line, landing between the queued taps and smearing the
-  timing being controlled. v3 buffers during the freeze and flushes after —
-  a regression test asserts zero UI writes while suspended.
-- **`getSavedValue` unguarded** — it returns `nil` for keys a build doesn't expose
-  and can raise on an unknown key. Now wrapped.
-- **Lag-switch teardown incomplete** — `clearLagSwitchConfig()` was never called,
-  leaving this script's config override owned after exit. Added, plus `autoUnblock`
-  and `maxDurationSeconds` so the backend self-releases if cleanup is ever skipped.
-- **`getLagSwitchStatus()` fields assumed** — the doc names the fields but doesn't
-  pin their types, so access is now defensive against a non-table return.
-- **Fragile `and/or` ternaries** for the hard-block flags, replaced with plain
-  boolean `and`.
-- Settings are coerced with `tonumber` rather than trusted to be numeric.
-
-Signatures confirmed correct in v2 and kept: `ui.sliderInt(id, label, default, min, max, width)`
-argument order, `ui.hotkey`/`ui.dynamicTextbox` shapes, `getSavedValue("settingsBuffer")`,
-the `lagSwitch` option key names, and `input.setHotkeyMode("loose")`.
 
 ---
 
 ## Tests
 
-The mock harness stubs every documented SMU global, asserts on invalid key names,
-unknown `lagSwitch` option keys, double-holds, `setDynamicText` on an undeclared id,
-`freeze(true)` during cleanup, and out-of-range slider defaults. It then drives
-`onSettings` → `onExecute` → `onCleanup` on a virtual clock.
-
-24 assertions across 11 cases: both phases emit the exact documented key order, the
-two taps land strictly inside the frozen window, the measured window matches
-`plannedFreezeMs()`, nothing is left held/frozen/lagging, and the self-test correctly
-reports a raising `freeze`, an empty process name, and macOS lag-switch unavailability.
+`tests/harness.lua` stubs every documented SMU global on a virtual clock and
+asserts on invalid key names, unknown `lagSwitch` option keys, double-holds,
+`setDynamicText` on an undeclared id, `freeze(true)` during cleanup, and
+out-of-range slider and dropdown defaults.
 
 ```
-lua5.4 test.lua
+cd tests && lua5.4 test.lua
 ```
+
+48 assertions across 15 cases. Beyond the obvious ones, these are the checks
+that have actually caught bugs:
+
+- **Exact key order per method** — `1 1 2 2 3 3` for interleave, six presses of
+  slot 1 before slot 2 for burst, `[F] 1 1 3 3 [U] 1 Backspace 3 Backspace` for
+  multi-slot ground item
+- **The safety limit doesn't re-arm under a held trigger.** It did: `runLoop`
+  stopped at 1 s, returned to the outer loop, saw the trigger still down and
+  restarted immediately, giving 1-second bursts until you let go. Now it waits
+  for release.
+- **Zero UI writes between the first and last keypress.** `ui.setDynamicText` +
+  `table.concat` per pass would dominate a zero-delay loop and is the single
+  easiest way to silently ruin this macro's timing.
+- **No cycles land outside the frozen window** in method 2.
+
+---
+
+## If it still doesn't work
+
+Run the self-test and compare its **built-in macro settings** block against what
+you have configured here. Then, in order of likelihood:
+
+1. **The built-in Item Desync macro doesn't work for you either.** Test it
+   directly — same slot, same hotkey. If it doesn't, this script won't, and the
+   problem is your setup or the game, not the sequence.
+2. **The game blocks hotbar slot keys**, or remaps them. Common in games with
+   custom inventory UIs.
+3. **Churn rate too low** — check the self-test number.
+4. **The gear isn't the right kind.** The glitch needs a tool with a `Handle`.
+   Handle-less tools have nothing to desync.
+5. **Methods 2 and 3 only:** freeze isn't landing — check the target process
+   name in SMU's main settings.
 
 ---
 
 ## Caveats
 
-- **Verified against the documented API and a mock host, not against a live Roblox
-  client.** I can't run Roblox here, so the emitted input sequence and all timing
-  are confirmed; whether the glitch reproduces on your build and in your specific
-  game is not.
-- Both items must be **droppable** — `CanBeDropped` is false on plenty of game-issued
-  tools, and the setup phase will silently do nothing if slot B can't be dropped.
-- Many games remap or disable Backspace-to-drop, and some disable hotbar slot keys
-  entirely. Set the drop key to match the game.
-- Roblox patches these. A method from 2023 may not survive the current engine.
-- Automating input and suspending the client are against the Roblox Terms of Use;
-  account action is possible.
+- **Verified against the documented API, the shipped C++ implementation, and a
+  mock host — not against a live Roblox client.** I can't run Roblox here. The
+  emitted input sequences and timing are confirmed; whether the glitch
+  reproduces in your game is not.
+- Roblox patched center-of-mass offsetting on **2025-09-30**, which killed the
+  emote-based speed glitch. Per the wiki, item desync survived that patch and is
+  now the recommended workaround for it — but engine behaviour moves, and
+  anything here can stop working.
+- Method 3 additionally needs both items to be **droppable** (`CanBeDropped` is
+  false on plenty of game-issued tools) and Backspace to be the game's drop key.
+- Automating input and suspending the client are against the Roblox Terms of
+  Use; account action is possible.
+
+Sources: [SMU repo](https://github.com/Spencer0187/Spencer-Macro-Utilities) ·
+[Lua scripting docs](https://github.com/Spencer0187/Spencer-Macro-Utilities/blob/main/docs/lua_macro_scripting.md) ·
+[Item Desync — Roblox Glitches Wiki](https://roblox-glitches.fandom.com/wiki/Item_Desync) ·
+[Speed Glitch — Roblox Glitches Wiki](https://roblox-glitches.fandom.com/wiki/Speed_Glitch)
